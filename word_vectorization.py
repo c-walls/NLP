@@ -410,24 +410,20 @@ class Word2Vec(WordEmbedding, BaseEstimator, TransformerMixin):
 
         print(f"\nTraining model...")
         average_loss = 0
-        for step in tqdm(range(self.n_steps), desc="Overall Progress", mininterval=1.0, bar_format="{l_bar}{bar} | Elapsed: {elapsed} | ETA: {remaining} | {rate_fmt}"):
-            step_loss = 0
-            num_batches = len(self.data) // self.batch_size
-            data_index = 0
-            for batch in tqdm(range(num_batches), desc="Batch Progress", mininterval=1.0, bar_format="{l_bar}{bar} | Elapsed: {elapsed} | ETA: {remaining} | {rate_fmt}"):
-                batch_data, batch_labels = self.generator(self.data, self.batch_size, self.num_skips, self.skip_window, data_index=data_index)
+        loss_values = []
+        with tqdm(total=self.n_steps, desc="Progress", bar_format="{l_bar}{bar} | Elapsed: {elapsed} | ETA: {remaining} | {rate_fmt}{postfix}", leave=False) as pbar:
+            for step in range(self.n_steps):
+                batch_data, batch_labels = self.generator(self.data, self.batch_size, self.num_skips, self.skip_window)
                 loss = self.train_step(batch_data, batch_labels)
-                step_loss += loss
-                data_index += self.batch_size
-            step_loss /= num_batches
-            average_loss += step_loss
-            if step % 2000 == 0:
-                if step > 0:
-                    average_loss /= 2000
-                tqdm.write(f'Average loss at step {step}: {average_loss}')
-                average_loss = 0
-        
+                average_loss += loss
+                if step % 500 == 0 and step > 0:
+                    average_loss /= 500
+                    pbar.set_postfix({'loss': average_loss.numpy(), 'step': step})
+                    loss_values.append(average_loss)
+                    average_loss = 0
+                pbar.update(1)
+    
         self.final_embeddings = self.normalized_embeddings.numpy()
-        print(f"\nTraining has completed successfully.\n")
-        return self
+        print(f"Training has completed successfully with a final loss of {loss_values[-1]}.\n")
+        return loss_values
     
