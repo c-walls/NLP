@@ -166,6 +166,51 @@ def cbow(data: List[int], batch_size: int, num_skips: int, skip_window: int, dat
     return batch, labels
 
 
+def skipgram (data: List[int], batch_size: int, num_skips: int, skip_window: int, data_index: int = 0):
+    """
+    Generate a batch of data for the skipgram model.
+
+    Parameters:
+    data:        List of word indices.
+    batch_size:  Number of words in each batch.
+    num_skips:   How many times to reuse an input to generate a label.
+    skip_window: How many words to consider left and right.
+    data_index:  Index to start with in the data list. Default is 0.
+
+    Returns:
+    Tuple[np.ndarray, np.ndarray]: Batch of input words and corresponding labels.
+    """
+    assert batch_size < len(data)
+    assert num_skips <= 2 * skip_window
+
+    batch = np.ndarray(shape=(batch_size), dtype=np.int32)
+    labels = np.ndarray(shape=(batch_size, 1), dtype=np.int32)
+    window_size = 2 * skip_window + 1
+
+    # Create a buffer to store the data
+    buffer = deque(maxlen=window_size)
+    for _ in range(window_size):
+        buffer.append(data[data_index])
+        data_index = (data_index + 1) % len(data)
+
+    # Generates the batch of context words and labels
+    for i in range(batch_size // num_skips):
+        target = skip_window
+        targets_to_avoid = [skip_window]
+
+        for j in range(num_skips):
+            while target in targets_to_avoid:
+                target = random.randint(0, window_size - 1)
+            targets_to_avoid.append(target)
+            batch[i * num_skips + j] = buffer[skip_window]
+            labels[i * num_skips + j, 0] = buffer[target]
+
+        # Move the window
+        buffer.append(data[data_index])
+        data_index = (data_index + 1) % len(data)
+
+    return batch, labels
+
 
 class WordEmbedding:
     def __init__(self, vocab_size: int,
@@ -232,13 +277,12 @@ class WordEmbedding:
     def eval(self):
         try:
             # Check embedding and nearby words
-            embedding = self.get_embedding('king')
+            embedding_king = self.get_embedding('king')
             similar_words = self.similar_by_word('king')
-            print(f"\nEmbedding for 'king': {embedding}")
+            print(f"\nEmbedding for 'king': {embedding_king}")
             print(f"\nWords similar to 'king': {similar_words}")
             
             # Test embedding relationships by analogy
-            embedding_king = self.get_embedding('king')
             embedding_man = self.get_embedding('man')
             embedding_woman = self.get_embedding('woman')
             result_vector = embedding_king - embedding_man + embedding_woman
@@ -253,7 +297,7 @@ class Word2Vec(WordEmbedding, BaseEstimator, TransformerMixin):
                  batch_size: int = 128,
                  embedding_size: int = 128,
                  n_steps: int = 10001,
-                 architecture: str = 'skip-gram',
+                 architecture: str = 'skipgram',
                  loss_type: str = 'sampled_softmax_loss',
                  optimizer: str = 'adagrad',
                  num_skips: int = 4,
@@ -279,12 +323,12 @@ class Word2Vec(WordEmbedding, BaseEstimator, TransformerMixin):
         self.valid_examples = valid_examples
     
     def chooseGenerator(self):
-        if self.architecture == 'skip-gram':
+        if self.architecture == 'skipgram':
             self.generator = skipgram
         elif self.architecture == 'cbow':
             self.generator = cbow
         else:
-            raise ValueError("Architecture must be either 'skip-gram' or 'cbow'.")
+            raise ValueError("Architecture must be either 'skipgram' or 'cbow'.")
     
     def __init__model(self):
         self.embeddings = tf.Variable(tf.random.uniform([self.vocab_size, self.embedding_size], -1.0, 1.0))
@@ -307,7 +351,7 @@ class Word2Vec(WordEmbedding, BaseEstimator, TransformerMixin):
     def train_step(self, batch_data, batch_labels):
         with tf.GradientTape() as tape:
         
-            if self.architecture == 'skip-gram':
+            if self.architecture == 'skipgram':
                 embed = tf.nn.embedding_lookup(self.embeddings, batch_data)
             elif self.architecture == 'cbow':
                 embed = tf.zeros([self.batch_size, self.embedding_size])
@@ -334,28 +378,29 @@ class Word2Vec(WordEmbedding, BaseEstimator, TransformerMixin):
         gradients = tape.gradient(loss, [self.embeddings, self.weights, self.biases])
         self.optimizer.apply_gradients(zip(gradients, [self.embeddings, self.weights, self.biases]))
         return loss
-
+    
     def fit(self, words):
         print(f"\nTokenizing words...")
         self.data = self.tokenMapping(words)
-
+    
         print(f"\nTraining model...")
         average_loss = 0
-        with tqdm(total=self.n_steps, desc="Progress", bar_format="{l_bar}{bar} | Elapsed: {elapsed} | ETA: {remaining} | {rate_fmt}") as pbar:
+        loss_values = []
+        with tqdm(total=self.n_steps, desc="Progress", bar_format="{l_bar}{bar} | Elapsed: {elapsed} | ETA: {remaining} | {rate_fmt}{postfix}", leave=False) as pbar:
             for step in range(self.n_steps):
                 batch_data, batch_labels = self.generator(self.data, self.batch_size, self.num_skips, self.skip_window)
                 loss = self.train_step(batch_data, batch_labels)
                 average_loss += loss
-                if step % 2000 == 0:
-                    if step > 0:
-                        average_loss /= 2000
-                    tqdm.write(f'Average loss at step {step}: {average_loss}')
+                if step % 500 == 0 and step > 0:
+                    average_loss /= 500
+                    pbar.set_postfix({'loss': average_loss.numpy(), 'step': step})
+                    loss_values.append(average_loss)
                     average_loss = 0
                 pbar.update(1)
-
+    
         self.final_embeddings = self.normalized_embeddings.numpy()
-        print(f"\nTraining has completed successfully.\n")
-        return self
+        print(f"\nTraining has completed successfully with a final loss of {loss_values[-1]}.\n")
+        return loss_values
     
     def fit_from_tokens(self, data, count, dictionary, reverse_dictionary):
         self.data = data
