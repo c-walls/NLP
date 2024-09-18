@@ -278,8 +278,8 @@ class WordEmbedding:
         try:
             # Check embedding and nearby words
             embedding_king = self.get_embedding('king')
-            similar_words = self.similar_by_word('king')
             print(f"\nEmbedding for 'king': {embedding_king}")
+            similar_words = self.similar_by_word('king')
             print(f"\nWords similar to 'king': {similar_words}")
             
             # Test embedding relationships by analogy
@@ -399,7 +399,7 @@ class Word2Vec(WordEmbedding, BaseEstimator, TransformerMixin):
                 pbar.update(1)
     
         self.final_embeddings = self.normalized_embeddings.numpy()
-        print(f"\nTraining has completed successfully with a final loss of {loss_values[-1]}.\n")
+        print(f"Training has completed successfully with a final loss of {loss_values[-1]}.\n")
         return loss_values
     
     def fit_from_tokens(self, data, count, dictionary, reverse_dictionary):
