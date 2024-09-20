@@ -219,7 +219,8 @@ class WordEmbedding:
                  n_steps: int,
                  architecture: str,
                  loss_type: str,
-                 optimizer: str):
+                 optimizer: str,
+                 learning_rate: float):
         self.vocab_size = vocab_size
         self.batch_size = batch_size
         self.embedding_size = embedding_size
@@ -227,6 +228,7 @@ class WordEmbedding:
         self.architecture = architecture
         self.loss_type = loss_type
         self.optimizer = optimizer
+        self.learning_rate = learning_rate
         self.final_embeddings = None
 
     def tokenMapping(self, words):
@@ -306,14 +308,13 @@ class Word2Vec(WordEmbedding, BaseEstimator, TransformerMixin):
                  learning_rate: float = 1.0,
                  valid_size: int = 16,
                  valid_window: int = 100):
-        super().__init__(vocab_size, batch_size, embedding_size, n_steps, architecture, loss_type, optimizer)
+        super().__init__(vocab_size, batch_size, embedding_size, n_steps, architecture, loss_type, optimizer, learning_rate)
         self.num_skips = num_skips
         self.skip_window = skip_window
         self.n_neg_samples = n_neg_samples
-        self.learning_rate = learning_rate
         self.valid_size = valid_size
         self.valid_window = valid_window
-
+        self.training_index = 0
         self.chooseSamples()
         self.chooseGenerator()
         self.__init__model()
@@ -325,8 +326,10 @@ class Word2Vec(WordEmbedding, BaseEstimator, TransformerMixin):
     def chooseGenerator(self):
         if self.architecture == 'skipgram':
             self.generator = skipgram
+            self.training_iterator = self.batch_size // self.num_skips
         elif self.architecture == 'cbow':
             self.generator = cbow
+            self.training_iterator = self.batch_size
         else:
             raise ValueError("Architecture must be either 'skipgram' or 'cbow'.")
     
@@ -386,16 +389,19 @@ class Word2Vec(WordEmbedding, BaseEstimator, TransformerMixin):
         print(f"\nTraining model...")
         average_loss = 0
         loss_values = []
-        with tqdm(total=self.n_steps, desc="Progress", bar_format="{l_bar}{bar} | Elapsed: {elapsed} | ETA: {remaining} | {rate_fmt}{postfix}", leave=False) as pbar:
+        with tqdm(total=self.n_steps, desc="Progress", bar_format="{l_bar}{bar} | Elapsed: {elapsed} | ETA: {remaining} | {rate_fmt}{postfix}") as pbar:
             for step in range(self.n_steps):
-                batch_data, batch_labels = self.generator(self.data, self.batch_size, self.num_skips, self.skip_window)
+                data_index = self.training_index % len(self.data)
+                batch_data, batch_labels = self.generator(self.data, self.batch_size, self.num_skips, self.skip_window, data_index)
                 loss = self.train_step(batch_data, batch_labels)
+                self.training_index += self.training_iterator
                 average_loss += loss
-                if step % 500 == 0 and step > 0:
-                    average_loss /= 500
-                    pbar.set_postfix({'loss': average_loss.numpy(), 'step': step})
+                if step % 1000 == 0 and step > 0:
+                    average_loss /= 1000
+                    pbar.set_postfix({'loss': average_loss.numpy(), 'training cycles': (self.training_index / len(self.data))})
                     loss_values.append(average_loss)
                     average_loss = 0
+                
                 pbar.update(1)
     
         self.final_embeddings = self.normalized_embeddings.numpy()
@@ -426,4 +432,78 @@ class Word2Vec(WordEmbedding, BaseEstimator, TransformerMixin):
         self.final_embeddings = self.normalized_embeddings.numpy()
         print(f"Training has completed successfully with a final loss of {loss_values[-1]}.\n")
         return loss_values
+    
+
+class GloVe(WordEmbedding):
+    def __init__(self, vocab_size: int,
+                 batch_size: int,
+                 embedding_size: int,
+                 n_steps: int,
+                 context_window: int = 2,
+                 learning_rate: float = 0.05,
+                 loss_type: str = 'mean_squared_error',
+                 optimizer: str = 'adam',
+                 x_max: int = 100,
+                 alpha: float = 0.75):
+        super().__init__(vocab_size, batch_size, embedding_size, n_steps, loss_type, optimizer, learning_rate)
+        self.context_window = context_window
+        self.x_max = x_max
+        self.alpha = alpha
+        self.cooccurrence_matrix = None
+        self.biases = None
+
+    def build_cooccurrence_matrix(self, data):
+        cooccurrence_matrix = np.zeros((self.vocab_size, self.vocab_size))
+        for i in range(len(data)):
+            for j in range(max(0, i - self.context_window), min(len(data), i + self.context_window + 1)):
+                if i != j:
+                    cooccurrence_matrix[data[i], data[j]] += 1
+        self.cooccurrence_matrix = cooccurrence_matrix
+
+    def train_glove(self):
+        # Initialize TensorFlow variables for embeddings and biases
+        embeddings = tf.Variable(tf.random.uniform([self.vocab_size, self.embedding_size]), name="embeddings")
+        biases = tf.Variable(tf.random.uniform([self.vocab_size]), name="biases")
+
+        # Define the optimizer
+        if self.optimizer == 'adam':
+            optimizer = tf.optimizers.Adam(learning_rate=self.learning_rate)
+        elif self.optimizer == 'adagrad':
+            optimizer = tf.optimizers.Adagrad(learning_rate=self.learning_rate)
+
+        # Define the training step function
+        @tf.function
+        def train_step(i, j, cooccurrence):
+            with tf.GradientTape() as tape:
+                weight = tf.where(cooccurrence < self.x_max, (cooccurrence / self.x_max) ** self.alpha, 1.0)
+                log_cooccurrence = tf.math.log(cooccurrence)
+                dot_product = tf.reduce_sum(tf.multiply(embeddings[i], embeddings[j]))
+                loss = weight * tf.square(dot_product + biases[i] + biases[j] - log_cooccurrence)
+            
+            gradients = tape.gradient(loss, [embeddings, biases])
+            optimizer.apply_gradients(zip(gradients, [embeddings, biases]))
+            return loss
+
+        # Training loop
+        for step in tqdm(range(self.n_steps), desc="Training GloVe"):
+            for i in range(self.vocab_size):
+                for j in range(self.vocab_size):
+                    if self.cooccurrence_matrix[i, j] > 0:
+                        cooccurrence = self.cooccurrence_matrix[i, j]
+                        loss = train_step(i, j, cooccurrence)
+
+        # Save the final embeddings and biases
+        self.final_embeddings = embeddings.numpy()
+        self.biases = biases.numpy()
+
+    def fit(self, words):
+        print(f"\nTokenizing words...")
+        self.data = self.tokenMapping(words)
+        print(f"\nBuilding co-occurrence matrix...")
+        self.build_cooccurrence_matrix(self.data)
+        print(f"\nTraining GloVe model...")
+        self.train_glove()
+        print(f"\nTraining has completed successfully.\n")
+        return self
+
     
